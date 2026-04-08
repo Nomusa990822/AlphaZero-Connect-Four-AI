@@ -7,7 +7,17 @@ from src.core.game import ConnectFourGame
 
 class Node:
     """
-    MCTS Node.
+    AlphaZero-style MCTS node.
+
+    Attributes:
+        game: game state at this node
+        parent: parent node
+        move: move that led from parent -> this node
+        prior: prior probability from the policy network
+        children: dict[move, child_node]
+        visit_count: number of visits
+        value_sum: accumulated value from simulations
+        is_expanded: whether this node has been expanded with priors
     """
 
     def __init__(
@@ -15,56 +25,68 @@ class Node:
         game: ConnectFourGame,
         parent: Optional["Node"] = None,
         move: Optional[int] = None,
-    ):
+        prior: float = 0.0,
+    ) -> None:
         self.game = game
         self.parent = parent
         self.move = move
+        self.prior = float(prior)
 
         self.children: Dict[int, Node] = {}
 
         self.visit_count = 0
         self.value_sum = 0.0
+        self.is_expanded = False
 
-        self.untried_moves = game.get_valid_moves()
-
-    def is_fully_expanded(self) -> bool:
-        return len(self.untried_moves) == 0
+    def expanded(self) -> bool:
+        return self.is_expanded
 
     def is_terminal(self) -> bool:
         return self.game.done
 
-    def expand(self) -> "Node":
-        move = self.untried_moves.pop()
-
-        next_game = self.game.copy()
-        next_game.apply_move(move)
-
-        child = Node(next_game, parent=self, move=move)
-        self.children[move] = child
-
-        return child
-
-    def best_child(self, c_puct: float):
-        from src.search.puct import puct_score
-
-        best_score = float("-inf")
-        best_node = None
-
-        for child in self.children.values():
-            score = puct_score(self, child, c_puct)
-
-            if score > best_score:
-                best_score = score
-                best_node = child
-
-        return best_node
-
-    def update(self, value: float):
-        self.visit_count += 1
-        self.value_sum += value
-
-    @property
     def value(self) -> float:
+        """
+        Mean value from this node's perspective.
+        """
         if self.visit_count == 0:
             return 0.0
         return self.value_sum / self.visit_count
+
+    def expand(self, priors: dict[int, float]) -> None:
+        """
+        Expand this node by creating children for all legal moves.
+
+        Args:
+            priors: mapping move -> prior probability
+        """
+        if self.is_terminal():
+            self.is_expanded = True
+            return
+
+        valid_moves = self.game.get_valid_moves()
+
+        for move in valid_moves:
+            if move not in self.children:
+                next_game = self.game.copy()
+                next_game.apply_move(move)
+                self.children[move] = Node(
+                    game=next_game,
+                    parent=self,
+                    move=move,
+                    prior=float(priors.get(move, 0.0)),
+                )
+
+        self.is_expanded = True
+
+    def update(self, value: float) -> None:
+        """
+        Update node statistics with a backed-up value.
+        """
+        self.visit_count += 1
+        self.value_sum += float(value)
+
+    def child_visit_counts(self) -> dict[int, int]:
+        return {move: child.visit_count for move, child in self.children.items()}
+
+    def child_priors(self) -> dict[int, float]:
+        return {move: child.prior for move, child in self.children.items()}
