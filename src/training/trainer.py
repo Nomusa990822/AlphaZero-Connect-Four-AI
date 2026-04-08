@@ -1,33 +1,129 @@
 """
-PyTorch dataset for AlphaZero-style training samples.
+Training utilities for AlphaZero-style Connect Four.
 """
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import dataclass
+
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+
+from src.neural.losses import alphazero_loss
+from src.neural.network import AlphaZeroNet
 
 
-class ConnectFourDataset(Dataset):
+@dataclass
+class TrainerConfig:
+    batch_size: int = 64
+    learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    epochs: int = 5
+
+
+class Trainer:
     """
-    Dataset wrapping (state, policy, value) samples.
+    Handles neural network optimization.
     """
 
-    def __init__(self, samples: list[tuple[np.ndarray, np.ndarray, float]]) -> None:
-        if not samples:
-            raise ValueError("samples cannot be empty.")
+    def __init__(
+        self,
+        model: AlphaZeroNet,
+        device: str | torch.device = "cpu",
+        learning_rate: float = 1e-3,
+        weight_decay: float = 1e-4,
+    ) -> None:
+        self.model = model
+        self.device = torch.device(device)
+        self.model.to(self.device)
 
-        self.samples = samples
+        self.optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
 
-    def __len__(self) -> int:
-        return len(self.samples)
+    def train_epoch(self, dataloader: DataLoader) -> dict[str, float]:
+        """
+        Train for one epoch.
 
-    def __getitem__(self, idx: int):
-        state, policy, value = self.samples[idx]
+        Returns:
+            Dictionary of average losses.
+        """
+        self.model.train()
 
-        state_tensor = torch.tensor(state, dtype=torch.float32)
-        policy_tensor = torch.tensor(policy, dtype=torch.float32)
-        value_tensor = torch.tensor([value], dtype=torch.float32)
+        total_loss_sum = 0.0
+        policy_loss_sum = 0.0
+        value_loss_sum = 0.0
+        num_batches = 0
 
-        return state_tensor, policy_tensor, value_tensor
+        for states, target_policies, target_values in dataloader:
+            states = states.to(self.device)
+            target_policies = target_policies.to(self.device)
+            target_values = target_values.to(self.device)
+
+            self.optimizer.zero_grad()
+
+            policy_logits, pred_values = self.model(states)
+            total_loss, p_loss, v_loss = alphazero_loss(
+                policy_logits=policy_logits,
+                pred_value=pred_values,
+                target_policy=target_policies,
+                target_value=target_values,
+            )
+
+            total_loss.backward()
+            self.optimizer.step()
+
+            total_loss_sum += float(total_loss.item())
+            policy_loss_sum += float(p_loss.item())
+            value_loss_sum += float(v_loss.item())
+            num_batches += 1
+
+        if num_batches == 0:
+            raise ValueError("Dataloader produced zero batches.")
+
+        return {
+            "total_loss": total_loss_sum / num_batches,
+            "policy_loss": policy_loss_sum / num_batches,
+            "value_loss": value_loss_sum / num_batches,
+        }
+
+    @torch.no_grad()
+    def evaluate_epoch(self, dataloader: DataLoader) -> dict[str, float]:
+        """
+        Evaluate for one epoch without optimization.
+        """
+        self.model.eval()
+
+        total_loss_sum = 0.0
+        policy_loss_sum = 0.0
+        value_loss_sum = 0.0
+        num_batches = 0
+
+        for states, target_policies, target_values in dataloader:
+            states = states.to(self.device)
+            target_policies = target_policies.to(self.device)
+            target_values = target_values.to(self.device)
+
+            policy_logits, pred_values = self.model(states)
+            total_loss, p_loss, v_loss = alphazero_loss(
+                policy_logits=policy_logits,
+                pred_value=pred_values,
+                target_policy=target_policies,
+                target_value=target_values,
+            )
+
+            total_loss_sum += float(total_loss.item())
+            policy_loss_sum += float(p_loss.item())
+            value_loss_sum += float(v_loss.item())
+            num_batches += 1
+
+        if num_batches == 0:
+            raise ValueError("Dataloader produced zero batches.")
+
+        return {
+            "total_loss": total_loss_sum / num_batches,
+            "policy_loss": policy_loss_sum / num_batches,
+            "value_loss": value_loss_sum / num_batches,
+        }
