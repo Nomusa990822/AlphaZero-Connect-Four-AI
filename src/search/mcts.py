@@ -1,158 +1,191 @@
 from __future__ import annotations
 
-import random
+from dataclasses import dataclass
+from typing import Optional
 
-from src.core.constants import PLAYER_ONE, PLAYER_TWO
-from src.core.game import ConnectFourGame
+import numpy as np
+import torch
+
+from src.core.constants import COLS, DRAW
+from src.core.move_encoder import legal_moves_mask, normalize_policy
+from src.core.state_encoder import encode_state_tensor
+from src.neural.network import AlphaZeroNet
+from src.search.dirichlet_noise import add_dirichlet_noise
 from src.search.node import Node
+from src.search.puct import puct_score
+
+
+@dataclass
+class MCTSResult:
+    selected_move: int
+    visit_counts: dict[int, int]
+    policy_target: np.ndarray
+    root_value: float
 
 
 class MCTS:
     """
-    Monte Carlo Tree Search for Connect Four.
-
-    This Stage 3 version includes tactical safeguards:
-    1. Play an immediate winning move if available.
-    2. Block the opponent's immediate winning move if necessary.
-    3. Otherwise run standard MCTS with random rollouts.
-
-    This makes the baseline search much more reliable for tactical positions.
+    AlphaZero-style MCTS using:
+    - policy network priors for expansion
+    - value network for leaf evaluation
+    - PUCT for selection
     """
 
-    def __init__(self, simulations: int = 100, c_puct: float = 1.4, seed: int | None = None):
+    def __init__(
+        self,
+        model: AlphaZeroNet,
+        simulations: int = 100,
+        c_puct: float = 1.5,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
+        add_root_noise: bool = False,
+        device: str | torch.device = "cpu",
+        seed: int | None = None,
+    ) -> None:
         if simulations < 1:
             raise ValueError("simulations must be at least 1.")
         if c_puct <= 0:
             raise ValueError("c_puct must be positive.")
 
+        self.model = model
         self.simulations = simulations
         self.c_puct = c_puct
-        self._rng = random.Random(seed)
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
+        self.add_root_noise = add_root_noise
+        self.device = torch.device(device)
+        self.seed = seed
 
-    def search(self, game: ConnectFourGame) -> int:
+    def search(self, game) -> MCTSResult:
         """
-        Run MCTS from the current position and return the selected move.
+        Run MCTS from the given root game state.
         """
         valid_moves = game.get_valid_moves()
         if not valid_moves:
             raise ValueError("No valid moves available for MCTS.")
 
-        # 1. Tactical immediate win
-        winning_move = self._find_immediate_winning_move(game, game.current_player)
-        if winning_move is not None:
-            return winning_move
+        root = Node(game=game.copy())
 
-        # 2. Tactical immediate block
-        opponent = PLAYER_TWO if game.current_player == PLAYER_ONE else PLAYER_ONE
-        blocking_move = self._find_immediate_winning_move(game, opponent)
-        if blocking_move is not None:
-            return blocking_move
+        # Expand root with network priors
+        root_priors, root_value = self._evaluate_state(root.game)
 
-        # 3. Standard MCTS
-        root = Node(game.copy())
+        if self.add_root_noise:
+            root_priors = add_dirichlet_noise(
+                root_priors,
+                alpha=self.dirichlet_alpha,
+                epsilon=self.dirichlet_epsilon,
+                seed=self.seed,
+            )
+
+        root.expand(root_priors)
+
+        # Optional backup of root value into root visit stats
+        root.update(root_value)
 
         for _ in range(self.simulations):
             node = root
+            search_path = [node]
 
             # Selection
-            while not node.is_terminal() and node.is_fully_expanded():
-                node = node.best_child(self.c_puct)
+            while node.expanded() and not node.is_terminal() and node.children:
+                node = self._select_child(node)
+                search_path.append(node)
 
-            # Expansion
-            if not node.is_terminal() and not node.is_fully_expanded():
-                node = node.expand()
-
-            # Simulation
-            value = self.rollout(node.game)
+            # Evaluation / expansion
+            if node.is_terminal():
+                value = self._terminal_value(node)
+            else:
+                priors, value = self._evaluate_state(node.game)
+                node.expand(priors)
 
             # Backpropagation
-            self.backpropagate(node, value)
+            self._backpropagate(search_path, value)
 
-        return self.select_best_move(root)
+        visit_counts = root.child_visit_counts()
+        policy_target = self._visit_count_policy(visit_counts)
+        selected_move = int(np.argmax(policy_target))
 
-    def rollout(self, game: ConnectFourGame) -> float:
+        return MCTSResult(
+            selected_move=selected_move,
+            visit_counts=visit_counts,
+            policy_target=policy_target,
+            root_value=float(root.value()),
+        )
+
+    def _select_child(self, node: Node) -> Node:
         """
-        Play a random simulation until the game ends.
+        Select child with highest PUCT score.
+        """
+        best_score = float("-inf")
+        best_child: Optional[Node] = None
+
+        for child in node.children.values():
+            score = puct_score(node, child, self.c_puct)
+            if score > best_score:
+                best_score = score
+                best_child = child
+
+        if best_child is None:
+            raise ValueError("No child available during MCTS selection.")
+
+        return best_child
+
+    def _evaluate_state(self, game) -> tuple[dict[int, float], float]:
+        """
+        Evaluate a non-terminal state with the neural network.
 
         Returns:
-            +1 if the rollout result is good for the player to move at 'game'
-            -1 if bad
-             0 for draw
+            priors: move -> probability over legal moves
+            value: scalar in [-1, 1] from current player's perspective
         """
-        temp_game = game.copy()
-        root_player = temp_game.current_player
+        state_tensor = encode_state_tensor(game, device=self.device)
 
-        while not temp_game.done:
-            valid_moves = temp_game.get_valid_moves()
+        with torch.no_grad():
+            policy_probs, value = self.model.predict(state_tensor)
 
-            # Rollout tactical bias:
-            # take immediate win if possible
-            winning_move = self._find_immediate_winning_move(temp_game, temp_game.current_player)
-            if winning_move is not None:
-                move = winning_move
-            else:
-                # otherwise block immediate opponent win if needed
-                opponent = PLAYER_TWO if temp_game.current_player == PLAYER_ONE else PLAYER_ONE
-                blocking_move = self._find_immediate_winning_move(temp_game, opponent)
-                if blocking_move is not None:
-                    move = blocking_move
-                else:
-                    move = self._rng.choice(valid_moves)
+        raw_policy = policy_probs[0].detach().cpu().numpy().astype(np.float32)
+        valid_moves = game.get_valid_moves()
+        normalized = normalize_policy(raw_policy, valid_moves)
 
-            temp_game.apply_move(move)
+        priors = {move: float(normalized[move]) for move in valid_moves}
+        return priors, float(value[0].item())
 
-        if temp_game.winner == 0:
+    def _terminal_value(self, node: Node) -> float:
+        """
+        Terminal value from the perspective of the player to move at this node.
+        """
+        winner = node.game.winner
+        current_player = node.game.current_player
+
+        if winner == DRAW:
             return 0.0
-        if temp_game.winner == root_player:
+        if winner is None:
+            return 0.0
+        if winner == current_player:
             return 1.0
         return -1.0
 
-    def backpropagate(self, node: Node, value: float) -> None:
+    def _backpropagate(self, search_path: list[Node], value: float) -> None:
         """
-        Backpropagate rollout value up the tree, alternating perspective.
+        Backpropagate value through the search path.
+
+        Value flips sign at each step because players alternate turns.
         """
-        while node is not None:
+        for node in reversed(search_path):
             node.update(value)
             value = -value
-            node = node.parent
 
-    def select_best_move(self, root: Node) -> int:
+    def _visit_count_policy(self, visit_counts: dict[int, int]) -> np.ndarray:
         """
-        Select the move with the highest visit count.
-        Break ties by favoring the more central column.
+        Convert child visit counts into a normalized policy target over columns.
         """
-        if not root.children:
-            raise ValueError("Root has no children; cannot select best move.")
+        policy = np.zeros(COLS, dtype=np.float32)
 
-        best_visit_count = max(child.visit_count for child in root.children.values())
-        best_moves = [
-            move for move, child in root.children.items()
-            if child.visit_count == best_visit_count
-        ]
+        total_visits = sum(visit_counts.values())
+        if total_visits <= 0:
+            raise ValueError("Cannot build visit-count policy with zero visits.")
 
-        return self._choose_center_preferred(best_moves)
+        for move, count in visit_counts.items():
+            policy[move] = count / total_visits
 
-    def _find_immediate_winning_move(self, game: ConnectFourGame, player: int) -> int | None:
-        """
-        Return a move that gives 'player' an immediate win, if one exists.
-        """
-        for move in self._ordered_moves(game.get_valid_moves()):
-            temp_game = game.copy()
-            temp_game.current_player = player
-            temp_game.apply_move(move)
-            if temp_game.winner == player:
-                return move
-        return None
-
-    def _ordered_moves(self, moves: list[int]) -> list[int]:
-        """
-        Order moves by center preference to improve search quality.
-        """
-        return sorted(moves, key=lambda col: abs(col - 3))
-
-    def _choose_center_preferred(self, moves: list[int]) -> int:
-        """
-        Prefer the most central move among tied candidates.
-        """
-        ordered = self._ordered_moves(moves)
-        return ordered[0]
+        return policy
