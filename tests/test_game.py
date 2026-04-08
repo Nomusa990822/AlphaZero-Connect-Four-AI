@@ -46,7 +46,7 @@ def test_cannot_play_in_full_column():
     for _ in range(6):
         game.apply_move(0)
 
-    assert game.board.is_column_full(0) is True
+    assert game.board.is_column_full(0)
 
     with pytest.raises(ValueError):
         game.apply_move(0)
@@ -55,7 +55,6 @@ def test_cannot_play_in_full_column():
 def test_horizontal_win_sets_game_done_and_winner():
     game = ConnectFourGame()
 
-    # Sequence creates a horizontal win for PLAYER_ONE on bottom row
     moves = [0, 0, 1, 1, 2, 2, 3]
     for move in moves:
         info = game.apply_move(move)
@@ -70,7 +69,6 @@ def test_horizontal_win_sets_game_done_and_winner():
 def test_vertical_win_sets_game_done_and_winner():
     game = ConnectFourGame()
 
-    # PLAYER_ONE wins vertically in column 0
     moves = [0, 1, 0, 1, 0, 1, 0]
     for move in moves:
         info = game.apply_move(move)
@@ -143,7 +141,6 @@ def test_get_state_returns_expected_keys():
 def test_draw_state_in_game_object():
     game = ConnectFourGame()
 
-    # Manually construct a full board with no winner
     pattern = [
         [1, 1, -1, -1, 1, 1, -1],
         [-1, -1, 1, 1, -1, -1, 1],
