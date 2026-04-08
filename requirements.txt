@@ -1,1 +1,26 @@
+# Core numerical computing
+numpy==1.26.4
 
+# Deep learning (CPU version)
+torch==2.2.2
+
+# Data handling (used later for training + analysis)
+pandas==2.2.2
+
+# Visualization (training curves, debugging)
+matplotlib==3.8.4
+
+# Progress bars for training loops
+tqdm==4.66.4
+
+# YAML config handling
+PyYAML==6.0.1
+
+# Testing framework
+pytest==8.2.1
+
+# Optional: web app (for demo later)
+flask==3.0.3
+
+# Optional: nicer CLI output/logging
+rich==13.7.1

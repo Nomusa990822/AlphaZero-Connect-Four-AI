@@ -1,0 +1,106 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+
+# =========================
+# Jupyter Notebooks
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Pytest
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# PyCharm / IntelliJ
+# =========================
+.idea/
+
+# =========================
+# Data (IMPORTANT)
+# =========================
+data/*
+!data/.gitkeep
+!data/self_play/.gitkeep
+!data/replay_buffer/.gitkeep
+!data/evaluation/.gitkeep
+
+# =========================
+# Models (IMPORTANT)
+# =========================
+models/*
+!models/checkpoints/.gitkeep
+!models/best/.gitkeep
+
+# =========================
+# Training artifacts
+# =========================
+*.pt
+*.pth
+*.ckpt
+
+# =========================
+# Notebook outputs
+# =========================
+*.nbconvert.ipynb
+
+# =========================
+# Reports / generated figures
+# =========================
+reports/figures/*
+!reports/figures/.gitkeep
+
+# =========================
+# Environment variables
+# =========================
+.env
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.bak
+*.swp
+*~
+
+# =========================
+# Build / packaging
+# =========================
+build/
+dist/
+*.egg-info/
+
+# =========================
+# Streamlit / Flask cache
+# =========================
+.streamlit/
+__pycache__/
