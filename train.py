@@ -32,7 +32,7 @@ def main() -> None:
     self_play = SelfPlay(
         model=model,
         device=device,
-        simulations=40,
+        simulations=50,
         c_puct=1.5,
         temperature=1.0,
         add_root_noise=True,
@@ -53,10 +53,10 @@ def main() -> None:
     )
 
     history = loop.run(
-        iterations=10,
-        self_play_games_per_iteration=20,
+        iterations=20,
+        self_play_games_per_iteration=25,
         batch_size=16,
-        epochs_per_iteration=2,
+        epochs_per_iteration=5,
     )
 
     print("\nTraining complete.")
