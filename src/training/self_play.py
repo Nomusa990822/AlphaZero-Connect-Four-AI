@@ -1,13 +1,9 @@
 """
 AlphaZero-style self-play using neural-guided MCTS.
 
-Each move stores:
-- encoded state
-- MCTS visit-count policy target
-- player-to-move
-
-After game end, each stored position is labeled with final outcome
-from that player's perspective.
+Includes temperature decay:
+- Early moves: exploratory (temperature = 1.0)
+- Later moves: greedy/strong (temperature = 0.1)
 """
 
 from __future__ import annotations
@@ -34,7 +30,7 @@ class SelfPlayConfig:
 
 class SelfPlay:
     """
-    Self-play driver using AlphaZero-style MCTS.
+    Self-play driver using AlphaZero-style MCTS with temperature decay.
     """
 
     def __init__(
@@ -51,8 +47,6 @@ class SelfPlay:
             raise ValueError("temperature must be positive.")
         if simulations < 1:
             raise ValueError("simulations must be at least 1.")
-        if c_puct <= 0:
-            raise ValueError("c_puct must be positive.")
 
         self.model = model
         self.device = torch.device(device)
@@ -64,9 +58,6 @@ class SelfPlay:
         self.seed = seed
 
     def generate_games(self, num_games: int) -> list[tuple[np.ndarray, np.ndarray, float]]:
-        """
-        Generate self-play samples from multiple games.
-        """
         if num_games < 1:
             raise ValueError("num_games must be at least 1.")
 
@@ -79,17 +70,6 @@ class SelfPlay:
         return all_samples
 
     def play_single_game(self, game_idx: int = 0) -> list[tuple[np.ndarray, np.ndarray, float]]:
-        """
-        Play one self-play game and return labeled training samples.
-
-        Each stored position includes:
-            - encoded state
-            - MCTS visit-count policy target
-            - player to move
-
-        After the game ends, each position is labeled with the final outcome
-        from that stored player's perspective.
-        """
         game = ConnectFourGame()
         trajectory: list[tuple[np.ndarray, np.ndarray, int]] = []
 
@@ -110,11 +90,16 @@ class SelfPlay:
             result = mcts.search(game)
 
             policy_target = result.policy_target
-            move = self._sample_move(policy_target)
+
+            # TEMPERATURE DECAY
+            temperature = 1.0 if move_number < 10 else 0.1
+
+            move = self._sample_move(policy_target, temperature)
             player = game.current_player
 
             trajectory.append((state, policy_target, player))
             game.apply_move(move)
+
             move_number += 1
 
         winner = game.winner
@@ -126,31 +111,29 @@ class SelfPlay:
 
         return samples
 
-    def _sample_move(self, policy: np.ndarray) -> int:
+    def _sample_move(self, policy: np.ndarray, temperature: float) -> int:
         """
-        Sample a move from a temperature-adjusted policy.
+        Sample move using temperature-adjusted policy.
         """
-        adjusted = self._apply_temperature(policy)
+        adjusted = self._apply_temperature(policy, temperature)
         moves = np.arange(len(adjusted))
         return int(self.rng.choice(moves, p=adjusted))
 
-    def _apply_temperature(self, policy: np.ndarray) -> np.ndarray:
+    def _apply_temperature(self, policy: np.ndarray, temperature: float) -> np.ndarray:
         """
-        Apply temperature to a visit-count policy.
+        Apply temperature scaling to policy.
         """
         adjusted = np.asarray(policy, dtype=np.float32).copy()
 
-        if adjusted.ndim != 1:
-            raise ValueError("policy must be a 1D array.")
-
-        if self.temperature == 1.0:
+        if temperature == 1.0:
             total = adjusted.sum()
             if total <= 0:
                 raise ValueError("Policy sum must be positive.")
             return adjusted / total
 
+        # Lower temperature → sharper distribution
         positive = adjusted > 0
-        adjusted[positive] = np.power(adjusted[positive], 1.0 / self.temperature)
+        adjusted[positive] = np.power(adjusted[positive], 1.0 / temperature)
 
         total = adjusted.sum()
         if total <= 0:
@@ -160,9 +143,6 @@ class SelfPlay:
 
     @staticmethod
     def _outcome_for_player(winner: int | None, player: int) -> float:
-        """
-        Convert the game winner into a value from one player's perspective.
-        """
         if winner == 0:
             return 0.0
         if winner == player:
