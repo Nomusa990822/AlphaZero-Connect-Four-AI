@@ -44,7 +44,7 @@ def main() -> None:
     self_play = SelfPlay(
         model=model,
         device=device,
-        simulations=60,
+        simulations=80,
         c_puct=1.5,
         add_root_noise=True,
         seed=42,
