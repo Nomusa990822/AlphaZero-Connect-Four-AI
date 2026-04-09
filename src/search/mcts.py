@@ -6,8 +6,8 @@ from typing import Optional
 import numpy as np
 import torch
 
-from src.core.constants import COLS, DRAW
-from src.core.move_encoder import legal_moves_mask, normalize_policy
+from src.core.constants import COLS, DRAW, PLAYER_ONE, PLAYER_TWO
+from src.core.move_encoder import normalize_policy
 from src.core.state_encoder import encode_state_tensor
 from src.neural.network import AlphaZeroNet
 from src.search.dirichlet_noise import add_dirichlet_noise
@@ -25,10 +25,13 @@ class MCTSResult:
 
 class MCTS:
     """
-    AlphaZero-style MCTS using:
-    - policy network priors for expansion
-    - value network for leaf evaluation
-    - PUCT for selection
+    AlphaZero-style MCTS with tactical safeguards.
+
+    Upgrades:
+    - immediate winning move detection
+    - immediate blocking move detection
+    - neural priors + value head
+    - visit-count policy targets
     """
 
     def __init__(
@@ -57,16 +60,27 @@ class MCTS:
         self.seed = seed
 
     def search(self, game) -> MCTSResult:
-        """
-        Run MCTS from the given root game state.
-        """
         valid_moves = game.get_valid_moves()
         if not valid_moves:
             raise ValueError("No valid moves available for MCTS.")
 
+        # -------------------------------------------------
+        # Tactical overrides: immediate win / immediate block
+        # -------------------------------------------------
+        winning_move = self._find_immediate_winning_move(game, game.current_player)
+        if winning_move is not None:
+            return self._build_forced_result(winning_move, valid_moves, root_value=1.0)
+
+        opponent = PLAYER_TWO if game.current_player == PLAYER_ONE else PLAYER_ONE
+        blocking_move = self._find_immediate_winning_move(game, opponent)
+        if blocking_move is not None:
+            return self._build_forced_result(blocking_move, valid_moves, root_value=0.5)
+
+        # -------------------------------------------------
+        # Standard neural-guided MCTS
+        # -------------------------------------------------
         root = Node(game=game.copy())
 
-        # Expand root with network priors
         root_priors, root_value = self._evaluate_state(root.game)
 
         if self.add_root_noise:
@@ -78,27 +92,22 @@ class MCTS:
             )
 
         root.expand(root_priors)
-
-        # Optional backup of root value into root visit stats
         root.update(root_value)
 
         for _ in range(self.simulations):
             node = root
             search_path = [node]
 
-            # Selection
             while node.expanded() and not node.is_terminal() and node.children:
                 node = self._select_child(node)
                 search_path.append(node)
 
-            # Evaluation / expansion
             if node.is_terminal():
                 value = self._terminal_value(node)
             else:
                 priors, value = self._evaluate_state(node.game)
                 node.expand(priors)
 
-            # Backpropagation
             self._backpropagate(search_path, value)
 
         visit_counts = root.child_visit_counts()
@@ -112,10 +121,46 @@ class MCTS:
             root_value=float(root.value()),
         )
 
+    def _build_forced_result(
+        self,
+        forced_move: int,
+        valid_moves: list[int],
+        root_value: float,
+    ) -> MCTSResult:
+        """
+        Build a deterministic MCTSResult for forced tactical moves.
+        """
+        visit_counts = {move: (1 if move == forced_move else 0) for move in valid_moves}
+        policy_target = np.zeros(COLS, dtype=np.float32)
+        policy_target[forced_move] = 1.0
+
+        return MCTSResult(
+            selected_move=forced_move,
+            visit_counts=visit_counts,
+            policy_target=policy_target,
+            root_value=float(root_value),
+        )
+
+    def _find_immediate_winning_move(self, game, player: int) -> int | None:
+        """
+        Return a move that gives 'player' an immediate win, if one exists.
+        """
+        for move in self._ordered_moves(game.get_valid_moves()):
+            temp_game = game.copy()
+            temp_game.current_player = player
+            temp_game.apply_move(move)
+            if temp_game.winner == player:
+                return move
+        return None
+
+    def _ordered_moves(self, moves: list[int]) -> list[int]:
+        """
+        Prefer central columns first.
+        """
+        center = COLS // 2
+        return sorted(moves, key=lambda col: abs(col - center))
+
     def _select_child(self, node: Node) -> Node:
-        """
-        Select child with highest PUCT score.
-        """
         best_score = float("-inf")
         best_child: Optional[Node] = None
 
@@ -131,13 +176,6 @@ class MCTS:
         return best_child
 
     def _evaluate_state(self, game) -> tuple[dict[int, float], float]:
-        """
-        Evaluate a non-terminal state with the neural network.
-
-        Returns:
-            priors: move -> probability over legal moves
-            value: scalar in [-1, 1] from current player's perspective
-        """
         state_tensor = encode_state_tensor(game, device=self.device)
 
         with torch.no_grad():
@@ -151,34 +189,21 @@ class MCTS:
         return priors, float(value[0].item())
 
     def _terminal_value(self, node: Node) -> float:
-        """
-        Terminal value from the perspective of the player to move at this node.
-        """
         winner = node.game.winner
         current_player = node.game.current_player
 
-        if winner == DRAW:
-            return 0.0
-        if winner is None:
+        if winner == DRAW or winner is None:
             return 0.0
         if winner == current_player:
             return 1.0
         return -1.0
 
     def _backpropagate(self, search_path: list[Node], value: float) -> None:
-        """
-        Backpropagate value through the search path.
-
-        Value flips sign at each step because players alternate turns.
-        """
         for node in reversed(search_path):
             node.update(value)
             value = -value
 
     def _visit_count_policy(self, visit_counts: dict[int, int]) -> np.ndarray:
-        """
-        Convert child visit counts into a normalized policy target over columns.
-        """
         policy = np.zeros(COLS, dtype=np.float32)
 
         total_visits = sum(visit_counts.values())
