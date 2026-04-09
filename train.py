@@ -30,13 +30,16 @@ def main() -> None:
     model = AlphaZeroNet()
     replay_buffer = ReplayBuffer(capacity=5000, seed=42)
     self_play = SelfPlay(
-        model=model,
-        device=device,
-        simulations=50,
-        c_puct=1.5,
-        temperature=1.0,
-        add_root_noise=True,
-        seed=42,
+    model=model,
+    device=device,
+    simulations=60,
+    c_puct=1.5,
+    add_root_noise=True,
+    seed=42,
+    early_temperature=1.0,
+    late_temperature=0.1,
+    temperature_drop_move=10,
+    augment_symmetry=True,
     )
     trainer = Trainer(
         model=model,
@@ -53,9 +56,9 @@ def main() -> None:
     )
 
     history = loop.run(
-        iterations=20,
-        self_play_games_per_iteration=25,
-        batch_size=16,
+        iterations=15,
+        self_play_games_per_iteration=30,
+        batch_size=32,
         epochs_per_iteration=5,
     )
 
