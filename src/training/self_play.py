@@ -26,7 +26,7 @@ class SelfPlayConfig:
     c_puct: float = 1.5
     early_temperature: float = 1.0
     late_temperature: float = 0.1
-    temperature_drop_move: int = 10
+    temperature_drop_move: int = 6
     add_root_noise: bool = True
     augment_symmetry: bool = True
     seed: int | None = None
@@ -141,9 +141,12 @@ class SelfPlay:
         return self.late_temperature
 
     def _sample_move(self, policy: np.ndarray, temperature: float) -> int:
-        adjusted = self._apply_temperature(policy, temperature)
-        moves = np.arange(len(adjusted))
-        return int(self.rng.choice(moves, p=adjusted))
+    if temperature < 0.2:
+        return int(np.argmax(policy))
+
+    adjusted = self._apply_temperature(policy, temperature)
+    moves = np.arange(len(adjusted))
+    return int(self.rng.choice(moves, p=adjusted))
 
     def _apply_temperature(self, policy: np.ndarray, temperature: float) -> np.ndarray:
         adjusted = np.asarray(policy, dtype=np.float32).copy()
