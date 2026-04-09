@@ -4,12 +4,13 @@ AlphaZero-style self-play using neural-guided MCTS.
 Upgrades:
 - temperature decay
 - optional horizontal symmetry augmentation
-- tactical MCTS support through upgraded search
+- deterministic late-game move selection
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import numpy as np
 import torch
 
@@ -48,7 +49,7 @@ class SelfPlay:
         seed: int | None = None,
         early_temperature: float = 1.0,
         late_temperature: float = 0.1,
-        temperature_drop_move: int = 10,
+        temperature_drop_move: int = 6,
         augment_symmetry: bool = True,
     ) -> None:
         if simulations < 1:
@@ -121,10 +122,8 @@ class SelfPlay:
         for state, policy, player in trajectory:
             value = self._outcome_for_player(winner, player)
 
-            # original sample
             samples.append((state, policy, value))
 
-            # horizontal mirror augmentation
             if self.augment_symmetry:
                 mirrored_state = self._mirror_state(state)
                 mirrored_policy = self._mirror_policy(policy)
@@ -133,20 +132,21 @@ class SelfPlay:
         return samples
 
     def _current_temperature(self, move_number: int) -> float:
-        """
-        Use higher temperature early, lower temperature later.
-        """
         if move_number < self.temperature_drop_move:
             return self.early_temperature
         return self.late_temperature
 
     def _sample_move(self, policy: np.ndarray, temperature: float) -> int:
-    if temperature < 0.2:
-        return int(np.argmax(policy))
+        """
+        Sample move using temperature-adjusted policy.
+        Deterministic in late game for stronger play.
+        """
+        if temperature < 0.2:
+            return int(np.argmax(policy))
 
-    adjusted = self._apply_temperature(policy, temperature)
-    moves = np.arange(len(adjusted))
-    return int(self.rng.choice(moves, p=adjusted))
+        adjusted = self._apply_temperature(policy, temperature)
+        moves = np.arange(len(adjusted))
+        return int(self.rng.choice(moves, p=adjusted))
 
     def _apply_temperature(self, policy: np.ndarray, temperature: float) -> np.ndarray:
         adjusted = np.asarray(policy, dtype=np.float32).copy()
