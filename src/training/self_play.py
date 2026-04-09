@@ -141,9 +141,16 @@ class SelfPlay:
         return self.late_temperature
 
     def _sample_move(self, policy: np.ndarray, temperature: float) -> int:
+    """
+    Sample move using temperature-adjusted policy.
+    Deterministic in late game for stronger play.
+    """
+
+    # Deterministic late game
     if temperature < 0.2:
         return int(np.argmax(policy))
 
+    # Normal sampling early game
     adjusted = self._apply_temperature(policy, temperature)
     moves = np.arange(len(adjusted))
     return int(self.rng.choice(moves, p=adjusted))
