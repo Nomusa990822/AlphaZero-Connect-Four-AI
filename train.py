@@ -32,7 +32,7 @@ def main() -> None:
     self_play = SelfPlay(
         model=model,
         device=device,
-        simulations=25,
+        simulations=40,
         c_puct=1.5,
         temperature=1.0,
         add_root_noise=True,
@@ -53,8 +53,8 @@ def main() -> None:
     )
 
     history = loop.run(
-        iterations=5,
-        self_play_games_per_iteration=5,
+        iterations=10,
+        self_play_games_per_iteration=20,
         batch_size=16,
         epochs_per_iteration=2,
     )
