@@ -1,15 +1,13 @@
 """
-Self-play data generation for AlphaZero-style Connect Four.
+AlphaZero-style self-play using neural-guided MCTS.
 
-This version uses:
-- current neural network for policy/value prediction
-- legal move masking
-- temperature-based move selection
-- final game outcome to label training examples
+Each move stores:
+- encoded state
+- MCTS visit-count policy target
+- player-to-move
 
-For Stage 5, MCTS is not yet network-guided in a full AlphaZero way.
-Instead, we use the network policy directly to generate playable
-training data and establish the training loop cleanly.
+After game end, each stored position is labeled with final outcome
+from that player's perspective.
 """
 
 from __future__ import annotations
@@ -19,137 +17,151 @@ import numpy as np
 import torch
 
 from src.core.game import ConnectFourGame
-from src.core.move_encoder import legal_moves_mask, normalize_policy
-from src.core.state_encoder import encode_state, encode_state_tensor
+from src.core.state_encoder import encode_state
 from src.neural.network import AlphaZeroNet
+from src.search.mcts import MCTS
 
 
 @dataclass
 class SelfPlayConfig:
     num_games: int = 10
+    simulations_per_move: int = 100
+    c_puct: float = 1.5
     temperature: float = 1.0
+    add_root_noise: bool = True
     seed: int | None = None
 
 
 class SelfPlay:
     """
-    Generates self-play games and training samples.
+    Self-play driver using AlphaZero-style MCTS.
     """
 
     def __init__(
         self,
         model: AlphaZeroNet,
         device: str | torch.device = "cpu",
+        simulations: int = 100,
+        c_puct: float = 1.5,
         temperature: float = 1.0,
+        add_root_noise: bool = True,
         seed: int | None = None,
     ) -> None:
         if temperature <= 0:
             raise ValueError("temperature must be positive.")
+        if simulations < 1:
+            raise ValueError("simulations must be at least 1.")
+        if c_puct <= 0:
+            raise ValueError("c_puct must be positive.")
 
         self.model = model
         self.device = torch.device(device)
+        self.simulations = simulations
+        self.c_puct = c_puct
         self.temperature = temperature
+        self.add_root_noise = add_root_noise
         self.rng = np.random.default_rng(seed)
+        self.seed = seed
 
     def generate_games(self, num_games: int) -> list[tuple[np.ndarray, np.ndarray, float]]:
         """
-        Generate self-play data from multiple games.
-
-        Returns:
-            List of (state, policy, value) samples.
+        Generate self-play samples from multiple games.
         """
         if num_games < 1:
             raise ValueError("num_games must be at least 1.")
 
         all_samples: list[tuple[np.ndarray, np.ndarray, float]] = []
 
-        for _ in range(num_games):
-            game_samples = self.play_single_game()
-            all_samples.extend(game_samples)
+        for game_idx in range(num_games):
+            samples = self.play_single_game(game_idx=game_idx)
+            all_samples.extend(samples)
 
         return all_samples
 
-    def play_single_game(self) -> list[tuple[np.ndarray, np.ndarray, float]]:
+    def play_single_game(self, game_idx: int = 0) -> list[tuple[np.ndarray, np.ndarray, float]]:
         """
         Play one self-play game and return labeled training samples.
 
-        During the game, we store:
-            (encoded_state, move_policy, player_to_move)
+        Each stored position includes:
+            - encoded state
+            - MCTS visit-count policy target
+            - player to move
 
-        After the game ends, we convert these into:
-            (encoded_state, move_policy, final_value_from_that_player_perspective)
+        After the game ends, each position is labeled with the final outcome
+        from that stored player's perspective.
         """
         game = ConnectFourGame()
         trajectory: list[tuple[np.ndarray, np.ndarray, int]] = []
 
+        move_number = 0
+
         while not game.done:
             state = encode_state(game)
-            policy = self._predict_policy(game)
 
-            move = self._sample_move(policy)
+            mcts = MCTS(
+                model=self.model,
+                simulations=self.simulations,
+                c_puct=self.c_puct,
+                add_root_noise=self.add_root_noise,
+                device=self.device,
+                seed=None if self.seed is None else self.seed + game_idx + move_number,
+            )
+
+            result = mcts.search(game)
+
+            policy_target = result.policy_target
+            move = self._sample_move(policy_target)
             player = game.current_player
 
-            trajectory.append((state, policy, player))
+            trajectory.append((state, policy_target, player))
             game.apply_move(move)
+            move_number += 1
 
         winner = game.winner
-        labeled_samples: list[tuple[np.ndarray, np.ndarray, float]] = []
+        samples: list[tuple[np.ndarray, np.ndarray, float]] = []
 
         for state, policy, player in trajectory:
             value = self._outcome_for_player(winner, player)
-            labeled_samples.append((state, policy, value))
+            samples.append((state, policy, value))
 
-        return labeled_samples
-
-    def _predict_policy(self, game: ConnectFourGame) -> np.ndarray:
-        """
-        Predict a legal move distribution from the network.
-        """
-        state_tensor = encode_state_tensor(game, device=self.device)
-
-        with torch.no_grad():
-            policy_probs, _ = self.model.predict(state_tensor)
-
-        raw_policy = policy_probs[0].detach().cpu().numpy().astype(np.float32)
-        valid_moves = game.get_valid_moves()
-        policy = normalize_policy(raw_policy, valid_moves)
-
-        if self.temperature != 1.0:
-            policy = self._apply_temperature(policy, valid_moves)
-
-        return policy.astype(np.float32)
-
-    def _apply_temperature(self, policy: np.ndarray, valid_moves: list[int]) -> np.ndarray:
-        """
-        Apply temperature scaling to a policy over valid moves.
-        """
-        adjusted = np.zeros_like(policy, dtype=np.float32)
-
-        valid_probs = np.array([policy[m] for m in valid_moves], dtype=np.float32)
-        valid_probs = np.power(valid_probs, 1.0 / self.temperature)
-
-        total = valid_probs.sum()
-        if total <= 0:
-            valid_probs = np.ones_like(valid_probs) / len(valid_probs)
-        else:
-            valid_probs = valid_probs / total
-
-        for move, prob in zip(valid_moves, valid_probs):
-            adjusted[move] = prob
-
-        return adjusted
+        return samples
 
     def _sample_move(self, policy: np.ndarray) -> int:
         """
-        Sample a move from the policy distribution.
+        Sample a move from a temperature-adjusted policy.
         """
-        moves = np.arange(len(policy))
-        return int(self.rng.choice(moves, p=policy))
+        adjusted = self._apply_temperature(policy)
+        moves = np.arange(len(adjusted))
+        return int(self.rng.choice(moves, p=adjusted))
+
+    def _apply_temperature(self, policy: np.ndarray) -> np.ndarray:
+        """
+        Apply temperature to a visit-count policy.
+        """
+        adjusted = np.asarray(policy, dtype=np.float32).copy()
+
+        if adjusted.ndim != 1:
+            raise ValueError("policy must be a 1D array.")
+
+        if self.temperature == 1.0:
+            total = adjusted.sum()
+            if total <= 0:
+                raise ValueError("Policy sum must be positive.")
+            return adjusted / total
+
+        positive = adjusted > 0
+        adjusted[positive] = np.power(adjusted[positive], 1.0 / self.temperature)
+
+        total = adjusted.sum()
+        if total <= 0:
+            raise ValueError("Temperature-adjusted policy sum must be positive.")
+
+        return adjusted / total
 
     @staticmethod
     def _outcome_for_player(winner: int | None, player: int) -> float:
         """
-        Convert final winner into value from the given player's perspective.
+        Convert the game winner into a value from one player's perspective.
         """
         if winner == 0:
             return 0.0
