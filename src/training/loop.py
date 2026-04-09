@@ -65,15 +65,15 @@ class TrainingLoop:
             raise ValueError("epochs_per_iteration must be at least 1.")
 
         history: list[dict] = []
-        total_start_time = time.time()
+        overall_start_time = time.time()
 
         print("\n" + "=" * 70)
         print("STARTING TRAINING")
         print("=" * 70)
         print(f"Iterations: {iterations}")
-        print(f"Self-play games per iteration: {self_play_games_per_iteration}")
+        print(f"Self-play games / iteration: {self_play_games_per_iteration}")
         print(f"Batch size: {batch_size}")
-        print(f"Epochs per iteration: {epochs_per_iteration}")
+        print(f"Epochs / iteration: {epochs_per_iteration}")
         print("=" * 70)
 
         for iteration in range(1, iterations + 1):
@@ -83,38 +83,42 @@ class TrainingLoop:
             print(f"ITERATION {iteration}")
             print("=" * 70)
 
-            # -------------------------------------------------
-            # Self-play
-            # -------------------------------------------------
+            # =========================
+            # SELF-PLAY
+            # =========================
             print("\nGenerating self-play games...")
+            self_play_start_time = time.time()
+
             new_samples = []
 
             for game_idx in range(self_play_games_per_iteration):
                 game_start_time = time.time()
 
-                game_samples = self.self_play.play_single_game(game_idx=game_idx)
-                new_samples.extend(game_samples)
+                samples = self.self_play.play_single_game(game_idx=game_idx)
+                new_samples.extend(samples)
 
-                game_duration = time.time() - game_start_time
+                game_elapsed = time.time() - game_start_time
                 print(
-                    f"Game {game_idx + 1}: "
-                    f"moves={len(game_samples)}, "
-                    f"samples={len(game_samples)}, "
-                    f"time={game_duration:.2f}s"
+                    f"Game {game_idx + 1}/{self_play_games_per_iteration}: "
+                    f"moves={len(samples)}, samples={len(samples)}, "
+                    f"time={game_elapsed:.2f}s"
                 )
 
             self.replay_buffer.extend(new_samples)
+            self_play_elapsed = time.time() - self_play_start_time
 
-            print(f"\nReplay buffer size: {len(self.replay_buffer)}")
-            print(f"New samples added this iteration: {len(new_samples)}")
+            print(f"\nSelf-play complete.")
+            print(f"New samples generated: {len(new_samples)}")
+            print(f"Replay buffer size: {len(self.replay_buffer)}")
+            print(f"Self-play time: {self_play_elapsed:.2f}s")
 
-            # -------------------------------------------------
-            # Training
-            # -------------------------------------------------
+            # =========================
+            # TRAINING
+            # =========================
             if len(self.replay_buffer) < batch_size:
-                iteration_duration = time.time() - iteration_start_time
-                print("\nNot enough data to train yet. Skipping training...")
-                print(f"Iteration {iteration} time: {iteration_duration:.2f}s")
+                iteration_elapsed = time.time() - iteration_start_time
+                print("\nNot enough data to train yet. Skipping training.")
+                print(f"Iteration {iteration} time: {iteration_elapsed:.2f}s")
                 continue
 
             print("\nBuilding dataset...")
@@ -122,42 +126,39 @@ class TrainingLoop:
             dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
             print("Training model...")
-            epoch_times: list[float] = []
+            training_start_time = time.time()
 
             for epoch in range(1, epochs_per_iteration + 1):
                 epoch_start_time = time.time()
 
                 metrics = self.trainer.train_epoch(dataloader)
 
-                epoch_duration = time.time() - epoch_start_time
-                epoch_times.append(epoch_duration)
+                epoch_elapsed = time.time() - epoch_start_time
 
                 print(
-                    f"Epoch {epoch}: "
+                    f"Epoch {epoch}/{epochs_per_iteration}: "
                     f"total={metrics['total_loss']:.4f}, "
                     f"policy={metrics['policy_loss']:.4f}, "
                     f"value={metrics['value_loss']:.4f}, "
-                    f"time={epoch_duration:.2f}s"
+                    f"time={epoch_elapsed:.2f}s"
                 )
 
                 history.append({
                     "iteration": iteration,
                     "epoch": epoch,
                     "buffer_size": len(self.replay_buffer),
-                    "epoch_time_seconds": epoch_duration,
+                    "epoch_time_seconds": epoch_elapsed,
                     **metrics,
                 })
 
-            iteration_duration = time.time() - iteration_start_time
+            training_elapsed = time.time() - training_start_time
+            iteration_elapsed = time.time() - iteration_start_time
 
-            print("\nIteration summary:")
-            print(f"- Samples added: {len(new_samples)}")
-            print(f"- Replay buffer size: {len(self.replay_buffer)}")
-            print(f"- Epochs run: {epochs_per_iteration}")
-            print(f"- Average epoch time: {sum(epoch_times) / len(epoch_times):.2f}s")
-            print(f"- Iteration time: {iteration_duration:.2f}s")
+            print("\nIteration complete.")
+            print(f"Training time: {training_elapsed:.2f}s")
+            print(f"Iteration {iteration} total time: {iteration_elapsed:.2f}s")
 
-        total_duration = time.time() - total_start_time
+        total_elapsed = time.time() - overall_start_time
 
         print("\n" + "=" * 70)
         print("TRAINING COMPLETE")
@@ -165,7 +166,7 @@ class TrainingLoop:
         print(f"Total iterations run: {iterations}")
         print(f"Final replay buffer size: {len(self.replay_buffer)}")
         print(f"History entries: {len(history)}")
-        print(f"Total training time: {total_duration:.2f}s ({total_duration / 60:.2f} min)")
+        print(f"Total training time: {total_elapsed:.2f}s ({total_elapsed / 60:.2f} min)")
         print("=" * 70)
 
         return history
