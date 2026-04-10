@@ -67,9 +67,9 @@ def main() -> None:
         name="AlphaZeroAgent",
     )
 
-    random_summary = evaluate_against_random(agent, num_games=6, seed=42)
-    heuristic_summary = evaluate_against_heuristic(agent, num_games=6)
-    minimax_summary = evaluate_against_minimax(agent, num_games=6, depth=2, seed=42)
+    random_summary = evaluate_against_random(agent, num_games=20, seed=42)
+    heuristic_summary = evaluate_against_heuristic(agent, num_games=20)
+    minimax_summary = evaluate_against_minimax(agent, num_games=20, depth=2, seed=42)
 
     print_summary("AlphaZeroAgent vs RandomAgent", random_summary)
     print_summary("AlphaZeroAgent vs HeuristicAgent", heuristic_summary)
